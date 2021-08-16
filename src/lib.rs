@@ -264,17 +264,28 @@ impl Instruction {
 ///     println!("{}", instruction.unwrap());
 /// }
 /// ```
-pub fn linear_sweep<'a>(
+pub fn linear_sweep<'a>(bytes: &'a [u8]) -> LinearSweep<'a> {
+    LinearSweep { bytes }
+}
+
+pub struct LinearSweep<'a> {
     bytes: &'a [u8],
-) -> Box<dyn Iterator<Item = Result<Instruction, MOSISError>> + 'a> {
-    let iter = bytes
-        // take two bytes at a time
-        .chunks_exact(2)
-        // assume instructions are decoded big endian
-        .map(|b| u16::from_be_bytes([b[0], b[1]]))
-        // map `u16`s into `Instruction`s
-        .map(|mc| Instruction::disassemble(mc));
-    Box::new(iter)
+}
+
+impl<'a> Iterator for LinearSweep<'a> {
+    type Item = Result<Instruction, MOSISError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bytes.len() < 2 {
+            return None;
+        }
+
+        let (inst_bytes, rest) = self.bytes.split_at(2);
+        self.bytes = rest;
+
+        let x = u16::from_be_bytes(inst_bytes.try_into().unwrap());
+        Some(Instruction::disassemble(x))
+    }
 }
 
 impl TryFrom<u16> for Instruction {
@@ -299,19 +310,15 @@ impl std::fmt::Display for Instruction {
             ($op:tt,$a:expr) => {
                 write!(f, "{:<4} {}", stringify!($op), $a)
             };
-            ($op:tt,$a:expr,$b:expr) => {
-                {
-                    let a = format!("{},", $a);
-                    write!(f, "{:<4} {:<4} {}", stringify!($op), a, $b)
-                }
-            };
-            ($op:tt,$a:expr,$b:expr,$c:expr) => {
-                {
-                    let a = format!("{},", $a);
-                    let b = format!("{},", $b);
-                    write!(f, "{:<4} {:<4} {:<4} {}", stringify!($op), a, b, $c)
-                }
-            };
+            ($op:tt,$a:expr,$b:expr) => {{
+                let a = format!("{},", $a);
+                write!(f, "{:<4} {:<4} {}", stringify!($op), a, $b)
+            }};
+            ($op:tt,$a:expr,$b:expr,$c:expr) => {{
+                let a = format!("{},", $a);
+                let b = format!("{},", $b);
+                write!(f, "{:<4} {:<4} {:<4} {}", stringify!($op), a, b, $c)
+            }};
         }
 
         use Condition::*;
