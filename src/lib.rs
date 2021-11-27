@@ -3,9 +3,6 @@
 //!
 //! [`MOSIS`]: https://github.com/JHUAPL/Beat-the-Machine
 
-use std::convert::{TryFrom, TryInto};
-use thiserror::Error;
-
 /// `MOSIS` general purpose registers.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(u8)]
@@ -28,9 +25,15 @@ pub enum Register {
     Rf,
 }
 
-impl TryFrom<u16> for Register {
+impl From<Register> for u8 {
+    fn from(reg: Register) -> Self {
+        reg as u8
+    }
+}
+
+impl TryFrom<u8> for Register {
     type Error = MOSISError;
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
         use Register::*;
         Ok(match value {
             0 => R0,
@@ -137,7 +140,7 @@ pub enum Condition {
 }
 
 /// Possible errors that occur when disassembling `u16` to [`Instruction`].
-#[derive(Debug, PartialEq, Eq, Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MOSISError {
     #[error("invalid opcode")]
     InvalidOpcode,
@@ -147,61 +150,83 @@ pub enum MOSISError {
     InvalidCondition,
 }
 
+mod opcode {
+    pub const MOV: u8 = 0;
+    pub const MOVI: u8 = 1;
+    pub const ADD: u8 = 2;
+    pub const SUB: u8 = 3;
+    pub const CMP: u8 = 4;
+    pub const JCC: u8 = 5;
+    pub const JMP: u8 = 6;
+    pub const CALL: u8 = 7;
+    pub const RET: u8 = 8;
+    pub const NOP: u8 = 9;
+    pub const IN: u8 = 10;
+    pub const OUT: u8 = 11;
+    pub const MUL: u8 = 12;
+}
+
 impl Instruction {
     /// Assemble an instruction to `u16`.
     pub fn assemble(&self) -> u16 {
         use Instruction::*;
         let (a, b, c, d) = match *self {
-            Mov { dst, src } => (0, 0, dst as u16, src as u16),
-            Movi { dst, imm } => (1, dst as u16, 0, imm as u16),
-            Add { dst, x, y } => (2, dst as u16, x as u16, y as u16),
-            Sub { dst, x, y } => (3, dst as u16, x as u16, y as u16),
-            Cmp { x, y } => (4, 0, x as u16, y as u16),
+            Mov { dst, src } => (opcode::MOV, 0u8, dst.into(), src.into()),
+            Movi { dst, imm } => (opcode::MOVI, dst.into(), 0, imm),
+            Add { dst, x, y } => (opcode::ADD, dst.into(), x.into(), y.into()),
+            Sub { dst, x, y } => (opcode::SUB, dst.into(), x.into(), y.into()),
+            Cmp { x, y } => (opcode::CMP, 0, x.into(), y.into()),
             Jcc { cond, offset } => {
                 let sign = if offset.is_negative() { 1 } else { 0 };
-                let val = sign << 7 | offset.abs() as u16;
-                (5, cond as u16, 0, val)
+                let val = sign << 7 | offset.abs() as u8;
+                (opcode::JCC, cond as u8, 0, val)
             }
-            Jmp { address } => (6, (address >> 8) as u16, 0, address as u16),
-            Call { address } => (7, (address >> 8) as u16, 0, address as u16),
-            Ret => (8, 0, 0, 0),
-            Nop => (9, 0, 0, 0),
-            In { dst } => (10, 0, 0, dst as u16),
-            Out { src } => (11, 0, 0, src as u16),
-            Mul { dst, x, y } => (12, dst as u16, x as u16, y as u16),
+            Jmp { address } => (opcode::JMP, (address >> 8) as u8, 0, address as u8),
+            Call { address } => (opcode::CALL, (address >> 8) as u8, 0, address as u8),
+            Ret => (opcode::RET, 0, 0, 0),
+            Nop => (opcode::NOP, 0, 0, 0),
+            In { dst } => (opcode::IN, 0, 0, dst.into()),
+            Out { src } => (opcode::OUT, 0, 0, src.into()),
+            Mul { dst, x, y } => (opcode::MUL, dst.into(), x.into(), y.into()),
         };
-        a << 12 | (b & 0xf) << 8 | c << 4 | d
+
+        let hi = a << 4 | b;
+        let lo = c << 4 | d;
+        u16::from_be_bytes([hi, lo])
     }
 
     /// All MOSIS instructions are 16 bits, but endianness is not specified in the documentation,
     /// so disassembly simply takes a `u16` to skirt around this ambiguity.
     pub fn disassemble(inst: u16) -> Result<Self, MOSISError> {
         // opcode is always first nibble
-        let opcode = (inst & 0xf000) >> 12;
+        let opcode = ((inst & 0xf000) >> 12) as u8;
 
         // next nibbles are often useful
-        let a = (inst & 0x0f00) >> 8;
-        let b = (inst & 0x00f0) >> 4;
-        let c = inst & 0x000f;
+        let a = ((inst & 0x0f00) >> 8) as u8;
+        let b = ((inst & 0x00f0) >> 4) as u8;
+        let c = (inst & 0x000f) as u8;
+
+        // address mask
+        let address = inst & 0x0fff;
 
         Ok(match opcode {
-            0b0000 => Self::Mov { dst: b.try_into()?, src: c.try_into()? },
+            opcode::MOV => Self::Mov { dst: b.try_into()?, src: c.try_into()? },
             0b0001 => Self::Movi {
                 dst: a.try_into()?,
                 imm: (inst & 0x00ff) as u8,
             },
-            0b0010 => Self::Add {
+            opcode::ADD => Self::Add {
                 dst: a.try_into()?,
                 x: b.try_into()?,
                 y: c.try_into()?,
             },
-            0b0011 => Self::Sub {
+            opcode::SUB => Self::Sub {
                 dst: a.try_into()?,
                 x: b.try_into()?,
                 y: c.try_into()?,
             },
-            0b0100 => Self::Cmp { x: b.try_into()?, y: c.try_into()? },
-            0b0101 => {
+            opcode::CMP => Self::Cmp { x: b.try_into()?, y: c.try_into()? },
+            opcode::JCC => {
                 let mut offset = (inst & 0x007f) as u8 as i8;
                 if inst & 0x0080 != 0 {
                     offset = -offset;
@@ -219,13 +244,13 @@ impl Instruction {
                     offset,
                 }
             }
-            0b0110 => Self::Jmp { address: inst & 0x0fff },
-            0b0111 => Self::Call { address: inst & 0x0fff },
-            0b1000 => Self::Ret,
-            0b1001 => Self::Nop,
-            0b1010 => Self::In { dst: c.try_into()? },
-            0b1011 => Self::Out { src: c.try_into()? },
-            0b1100 => Self::Mul {
+            opcode::JMP => Self::Jmp { address },
+            opcode::CALL => Self::Call { address },
+            opcode::RET => Self::Ret,
+            opcode::NOP => Self::Nop,
+            opcode::IN => Self::In { dst: c.try_into()? },
+            opcode::OUT => Self::Out { src: c.try_into()? },
+            opcode::MUL => Self::Mul {
                 dst: a.try_into()?,
                 x: b.try_into()?,
                 y: c.try_into()?,
@@ -246,8 +271,8 @@ impl Instruction {
 /// ```
 /// use mosis::{linear_sweep, Instruction::*, Register::*};
 ///
-/// let bytes = &[0x23, 0x12, 0x2a, 0x34, 0x3a, 0x98, 0x3f, 0xed];
-/// let mut x = linear_sweep(bytes);
+/// let bytes = [0x2312, 0x2a34, 0x3a98, 0x3fed];
+/// let mut x = linear_sweep(&bytes);
 ///
 /// assert_eq!(x.next(), Some(Ok(Add { dst: R3, x: R1, y: R2 })));
 /// assert_eq!(x.next(), Some(Ok(Add { dst: Ra, x: R3, y: R4 })));
@@ -259,32 +284,30 @@ impl Instruction {
 /// ```
 /// use mosis::linear_sweep;
 ///
-/// # let bytes = &[0x23, 0x12, 0x2a, 0x34, 0x3a, 0x98, 0x3f, 0xed];
+/// # let bytes = &[0x2312, 0x2a34, 0x3a98, 0x3fed];
 /// for instruction in linear_sweep(bytes) {
 ///     println!("{}", instruction.unwrap());
 /// }
 /// ```
-pub fn linear_sweep<'a>(bytes: &'a [u8]) -> LinearSweep<'a> {
-    LinearSweep { bytes }
+pub fn linear_sweep(data: &impl AsRef<[u16]>) -> LinearSweep<'_> {
+    LinearSweep { data: data.as_ref() }
 }
 
 pub struct LinearSweep<'a> {
-    bytes: &'a [u8],
+    data: &'a [u16],
 }
 
-impl<'a> Iterator for LinearSweep<'a> {
+impl Iterator for LinearSweep<'_> {
     type Item = Result<Instruction, MOSISError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.bytes.len() < 2 {
-            return None;
-        }
+        // get the next instruction to decode
+        let inst = self.data.first()?;
 
-        let (inst_bytes, rest) = self.bytes.split_at(2);
-        self.bytes = rest;
+        // advance the data slice
+        self.data = &self.data[1..];
 
-        let x = u16::from_be_bytes(inst_bytes.try_into().unwrap());
-        Some(Instruction::disassemble(x))
+        Some(Instruction::disassemble(*inst))
     }
 }
 
@@ -422,7 +445,7 @@ mod tests {
 
     #[test]
     fn print_test() -> Result<(), MOSISError> {
-        println!("");
+        println!();
         let bytes = &[0x23, 0x12, 0x2a, 0x34, 0x3a, 0x98, 0x3f, 0xed];
         for instruction in linear_sweep(bytes) {
             println!("{}", instruction?);
